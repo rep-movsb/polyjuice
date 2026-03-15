@@ -30,8 +30,6 @@ class CollectorExchange(CollectorInterface):
         self.dump_start_timestamp = time()
 
     async def subscribe_to_market(self, market: Market):
-        if len(self.subscribed_markets) >= 500:
-            return
         await self.subscriber.subscribe_to_assets([asset.id for asset in market.assets])
         self.subscribed_markets[market.conditionId] = market
         for asset in market.assets:

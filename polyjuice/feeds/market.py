@@ -43,6 +43,27 @@ class MarketSubscriber:
         await self.connection.send(dumps(msg))
 
 
+def print_event(
+    name: str,
+    market: Market,
+    outcome: str,
+    side: str = "",
+    price: str = "",
+    size: str = "",
+    best_bid: str = "",
+    best_ask: str = "",
+    spread: str = "",
+    old_tick_size: str = "",
+    new_tick_size: str = "",
+):
+    print(
+        f"{name:<16} {market.slug[:50]:<50} {outcome[:15]:<15} "
+        + f"{side:>4} {price[:5]:>5} {size[:10]:>10} "
+        + f"{best_bid[:6]:>6} {best_ask[:6]:>6} {spread[:6]:>6} "
+        + f"{old_tick_size:>5} {new_tick_size:>5}"
+    )
+
+
 class MarketFeed(Feed):
 
     connection: ClientConnection
@@ -105,37 +126,57 @@ class MarketFeed(Feed):
                     market = self.exchange.get_market_from_condition_id(event["market"])
                     for pc in event["price_changes"]:
                         outcome = self.exchange.get_outcome_for_asset(pc["asset_id"])
-                        print(
-                            f"PRICE_CHANGE     {market.slug[:50]:<50} {outcome[:30]:<30} {pc['side']:>4} {pc['price'][:5]:>5} {pc['size'][:10]:>10} {pc['best_bid'][:6]:>6} {pc['best_ask'][:6]:>6}"
+                        print_event(
+                            "PRICE_CHANGE",
+                            market,
+                            outcome,
+                            side=pc["side"],
+                            price=pc["price"],
+                            size=pc["size"],
+                            best_bid=pc["best_bid"],
+                            best_ask=pc["best_ask"],
                         )
 
                 elif event["event_type"] == "book":
                     market = self.exchange.get_market_from_condition_id(event["market"])
                     outcome = self.exchange.get_outcome_for_asset(event["asset_id"])
-                    print(
-                        f"BOOK             {market.slug[:50]:<50} {outcome[:30]:<30} {len(event['bids']):>5} {len(event['asks']):>5}"
-                    )
+                    print_event("BOOK", market, outcome)
 
                 elif event["event_type"] == "best_bid_ask":
                     market = self.exchange.get_market_from_condition_id(event["market"])
                     outcome = self.exchange.get_outcome_for_asset(event["asset_id"])
-                    print(
-                        f"BEST_BID_ASK     {market.slug[:50]:<50} {outcome[:30]:<30} {' ':>21} {event['best_bid'][:6]:>6} {event['best_ask'][:6]:>6} {event['spread'][:6]:>6}"
+                    print_event(
+                        "BEST_BID_ASK",
+                        market,
+                        outcome,
+                        best_bid=event["best_bid"],
+                        best_ask=event["best_ask"],
+                        spread=event["spread"],
                     )
 
                 elif event["event_type"] == "last_trade_price":
                     market = self.exchange.get_market_from_condition_id(event["market"])
                     outcome = self.exchange.get_outcome_for_asset(event["asset_id"])
-                    print(
-                        f"LAST_TRADE_PRICE {market.slug[:50]:<50} {outcome[:30]:<30} {pc['side']:>4} {pc['price'][:5]:>5} {pc['size']:>10}"
+                    print_event(
+                        "LAST_TRADE_PRICE",
+                        market,
+                        outcome,
+                        side=event["side"],
+                        price=event["price"],
+                        size=event["size"],
                     )
 
                 elif event["event_type"] == "tick_size_change":
                     market = self.exchange.get_market_from_condition_id(event["market"])
                     outcome = self.exchange.get_outcome_for_asset(event["asset_id"])
-                    print(
-                        f"TICK_SIZE_CHANGE {market.slug[:50]:<50} {outcome[:30]:<30} {event['old_tick_size']:>5} > {event['new_tick_size']:>5}"
+                    print_event(
+                        "TICK_SIZE_CHANGE",
+                        market,
+                        outcome,
+                        old_tick_size=event["old_tick_size"],
+                        new_tick_size=event["new_tick_size"],
                     )
 
                 else:
-                    print(dumps(event, indent=2))
+                    warning("Unexpected message:")
+                    warning(dumps(event, indent=2))

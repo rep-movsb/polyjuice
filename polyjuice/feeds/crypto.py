@@ -5,6 +5,7 @@ from itertools import product
 from json import JSONDecodeError, loads, dumps
 from logging import warning
 from websockets import connect
+from websockets.asyncio.client import ClientConnection
 
 from polyjuice.collectorinterface import CollectorInterface
 from polyjuice.configuration import get_configuration
@@ -28,22 +29,8 @@ def compute_crypto_slug(prefix, ts, interval):
 
 class CryptoFeed(Feed):
 
-    watched_crypto_slugs: set[str]
-
     async def initialize(self, exchange: CollectorInterface):
         self.exchange = exchange
-        now = datetime.now().replace(microsecond=0)
-        range_24h = [
-            int((now + timedelta(minutes=m)).timestamp()) for m in range(0, 24 * 60)
-        ]
-        self.watched_crypto_slugs = set(
-            compute_crypto_slug(c, ts, i)
-            for (c, ts, i) in product(
-                configuration.watched_symbols,
-                range_24h,
-                configuration.watched_ranges,
-            )
-        )
 
     async def fetch_loop(self):
         async with connect(
@@ -57,20 +44,22 @@ class CryptoFeed(Feed):
             }
             await connection.send(dumps(subscribe_message))
 
-            async with TaskGroup() as background_tasks:
-                background_tasks.create_task(self.subscribe_crypto_markets_24h())
+            async with TaskGroup() as task_group:
+                task_group.create_task(self.subscribe_crypto_markets_24h())
+                task_group.create_task(self.receive_crypto_updates_loop(connection))
 
-            while True:
-                message = await connection.recv()
-                try:
-                    data = loads(message)
-                except JSONDecodeError:
-                    warning(f"Received unexpected message: {message}")
-                    continue
-                self.exchange.log_event(data)
-                print(
-                    f"CRYPTO_PRICE     {data['payload']['symbol']:8} {data['payload']['value']:>10}"
-                )
+    async def receive_crypto_updates_loop(self, connection: ClientConnection):
+        while True:
+            message = await connection.recv()
+            try:
+                data = loads(message)
+            except JSONDecodeError:
+                warning(f"Received unexpected message: {message}")
+                continue
+            self.exchange.log_event(data)
+            print(
+                f"CRYPTO_PRICE     {data['payload']['symbol']:8} {data['payload']['value']:>10}"
+            )
 
     async def get_crypto_market(self, slug: str) -> Market:
         async with ClientSession() as session:
@@ -94,7 +83,22 @@ class CryptoFeed(Feed):
         )
 
     async def subscribe_crypto_markets_24h(self):
-        for slug, _ in sorted(self.watched_crypto_slugs, key=lambda e: e[1]):
+        now = datetime.now().replace(microsecond=0)
+        range_24h = [
+            int((now + timedelta(minutes=m)).timestamp()) for m in range(0, 24 * 60)
+        ]
+        watched_crypto_slugs = set(
+            compute_crypto_slug(c, ts, i)
+            for (c, ts, i) in product(
+                configuration.watched_symbols,
+                range_24h,
+                configuration.watched_ranges,
+            )
+        )
+        for slug, _ in sorted(watched_crypto_slugs, key=lambda e: e[1]):
             if not any(market.slug == slug for market in self.exchange.get_markets()):
-                market = await self.get_crypto_market(slug)
-                await self.exchange.subscribe_to_market(market)
+                try:
+                    market = await self.get_crypto_market(slug)
+                    await self.exchange.subscribe_to_market(market)
+                except Exception as ex:
+                    warning(f"Failed to subscribe to market {slug}: {str(ex)}")
