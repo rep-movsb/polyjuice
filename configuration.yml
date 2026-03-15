@@ -1,0 +1,20 @@
+dump_interval: 60
+dump_directory: data/streams
+state_file: data/streams/collector-state.json
+market_feed:
+  websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  websocket_ping_interval: 10
+  slug_filters:
+    - "-updown-"
+crypto_feed:
+  gamma_url: https://gamma-api.polymarket.com/events/slug
+  rtds_websocket_url: wss://ws-live-data.polymarket.com
+  rtds_websocket_ping_interval: 5
+  watched_symbols:
+    - btc
+    - eth
+    - sol
+    - xrp
+  watched_ranges:
+    - 5m
+    - 15m
