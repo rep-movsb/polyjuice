@@ -2,6 +2,7 @@ from asyncio import gather, run, sleep
 from dataclasses import asdict
 from json import JSONDecodeError, dump, dumps, load
 from logging import error, info, warning
+from multiprocessing import Process, Queue
 from time import time
 from typing import Any, Type, Iterable
 
@@ -14,20 +15,71 @@ from polyjuice.models import Market
 configuration = get_configuration()
 
 
-class CollectorExchange(CollectorInterface):
+class WriterProcessException(Exception): ...
 
+
+class Collector(CollectorInterface):
+
+    FeedClasses: list[type[Feed]]
     subscriber: MarketSubscriber
     subscribed_markets: dict[id, Market]
     asset_to_outcome_map: dict[str, str]
     events: list[dict[str, Any]]
-    dump_start_timestamp: float
+    writer_process: Process
+    write_queue: Queue
 
-    def __init__(self, subscriber: MarketSubscriber):
-        self.subscriber = subscriber
+    def __init__(self, *FeedClasses: Type[Feed]):
+        self.feeds = [FeedClass() for FeedClass in FeedClasses]
+        self.subscriber = None
         self.subscribed_markets = dict()
         self.asset_to_outcome_map = dict()
         self.events = list()
-        self.dump_start_timestamp = time()
+        self.writer_process = None
+        self.write_queue = Queue()
+
+    def run_sync(self):
+        run(self.run())
+
+    async def run(self):
+        try:
+            self.writer_process = Process(
+                target=self.write_chunks, args=(self.write_queue,)
+            )
+            self.writer_process.start()
+            async with market_connect() as market_connection:
+                self.subscriber = MarketSubscriber(market_connection)
+                for feed in self.feeds:
+                    await feed.initialize(self)
+                await self.recover_state()
+                info(f"Started collector at {time()}")
+                await gather(
+                    *[
+                        self.dump_data_loop(),
+                        self.monitor_writer_process_loop(),
+                        *(feed.fetch_loop() for feed in self.feeds),
+                    ]
+                )
+        except WriterProcessException:
+            self.write_queue.cancel_join_thread()
+            raise
+        except Exception as ex:
+            error(f"Uncaught exception: {str(ex)}")
+            self.dump_events(".incomplete")
+            self.write_queue.put(None)
+            self.writer_process.join()
+            raise
+
+    async def dump_data_loop(self):
+        while True:
+            await sleep(configuration.dump_interval)
+            self.save_state()
+            self.dump_events()
+
+    async def monitor_writer_process_loop(self):
+        while True:
+            await sleep(1)
+            if not self.writer_process.is_alive():
+                raise WriterProcessException("Writer process is dead")
 
     async def subscribe_to_market(self, market: Market):
         await self.subscriber.subscribe_to_assets([asset.id for asset in market.assets])
@@ -51,15 +103,12 @@ class CollectorExchange(CollectorInterface):
         return self.asset_to_outcome_map[asset_id]
 
     def log_event(self, event: dict):
-        self.events.append(event | {"local_timestamp": time()})
-
-    def get_events(self) -> list[dict[str, Any]]:
-        return self.events
+        self.write_queue.put(event | {"local_timestamp": time()})
 
     async def recover_state(self):
         try:
             with open(configuration.state_file) as file:
-                for id, market in load(file).items():
+                for market in load(file).values():
                     await self.subscribe_to_market(Market.from_dict(**market))
         except OSError:
             info("Could not open state file")
@@ -82,51 +131,24 @@ class CollectorExchange(CollectorInterface):
         info(f"Saved state")
 
     def dump_events(self, suffix=""):
-        filename = (
-            f"{configuration.dump_directory}/{self.dump_start_timestamp}{suffix}.jsonl"
-        )
-        with open(filename, "w") as file:
-            for event in self.events:
-                file.write(f"{dumps(event)}\n")
-        info(f"Dumped {len(self.events)} events")
-        self.events = []
-        self.dump_start_timestamp = time()
+        self.write_queue.put(suffix)
 
-
-class Collector:
-
-    def __init__(self, *FeedClasses: Type[Feed]):
-        self.FeedClasses = FeedClasses
-
-    def run_sync(self):
-        run(self.run())
-
-    async def run(self):
-        try:
-            async with market_connect() as market_connection:
-                subscriber = MarketSubscriber(market_connection)
-                exchange = CollectorExchange(subscriber)
-                feeds = [FeedClass() for FeedClass in self.FeedClasses]
-                for feed in feeds:
-                    await feed.initialize(exchange)
-                await exchange.recover_state()
-                info(f"Started collector at {time()}")
-                await gather(
-                    *[
-                        self.dump_data_loop(exchange),
-                        *(feed.fetch_loop() for feed in feeds),
-                    ]
+    def write_chunks(self, queue: Queue):
+        dump_start_timestamp = time()
+        events = []
+        while (item := queue.get()) is not None:
+            if type(item) is str:
+                filename = (
+                    f"{configuration.dump_directory}/{dump_start_timestamp}{item}.jsonl"
                 )
-        except Exception as ex:
-            error(f"Uncaught exception: {str(ex)}")
-            exchange.dump_events(".incomplete")
-            raise
-
-    async def dump_data_loop(self, exchange: CollectorExchange):
-        while True:
-            await sleep(configuration.dump_interval)
-            exchange.save_state()
-            exchange.dump_events()
+                with open(filename, "w") as file:
+                    for event in events:
+                        file.write(f"{dumps(event)}\n")
+                info(f"Dumped {len(events)} events")
+                events = []
+                dump_start_timestamp = time()
+            else:
+                events.append(item)
 
 
 if __name__ == "__main__":
