@@ -7,12 +7,14 @@ from time import time
 from typing import Any, Type, Iterable
 
 from polyjuice.collectorinterface import CollectorInterface
-from polyjuice.configuration import get_configuration
+from polyjuice.configurations.collector import CollectorConfiguration
 from polyjuice.feed import Feed
 from polyjuice.feeds.market import MarketSubscriber, market_connect
 from polyjuice.models import Market
 
-configuration = get_configuration()
+
+def conf() -> CollectorConfiguration:
+    return CollectorConfiguration.get()
 
 
 class WriterProcessException(Exception): ...
@@ -71,7 +73,7 @@ class Collector(CollectorInterface):
 
     async def dump_data_loop(self):
         while True:
-            await sleep(configuration.dump_interval)
+            await sleep(conf().dump_interval)
             self.save_state()
             self.dump_events()
 
@@ -107,7 +109,7 @@ class Collector(CollectorInterface):
 
     async def recover_state(self):
         try:
-            with open(configuration.state_file) as file:
+            with open(conf().state_file) as file:
                 for market in load(file).values():
                     await self.subscribe_to_market(Market.from_dict(**market))
         except OSError:
@@ -115,12 +117,12 @@ class Collector(CollectorInterface):
         except JSONDecodeError:
             warning("Could not recover state")
         except Exception as ex:
-            print(str(ex))
+            error(str(ex))
             raise
         info(f"{len(self.subscribed_markets)} markets recovered")
 
     def save_state(self):
-        with open(configuration.state_file, "w") as file:
+        with open(conf().state_file, "w") as file:
             dump(
                 {
                     market.id: asdict(market)
@@ -138,9 +140,7 @@ class Collector(CollectorInterface):
         events = []
         while (item := queue.get()) is not None:
             if type(item) is str:
-                filename = (
-                    f"{configuration.dump_directory}/{dump_start_timestamp}{item}.jsonl"
-                )
+                filename = f"{conf().dump_directory}/{dump_start_timestamp}{item}.jsonl"
                 with open(filename, "w") as file:
                     for event in events:
                         file.write(f"{dumps(event)}\n")
@@ -153,11 +153,20 @@ class Collector(CollectorInterface):
 
 if __name__ == "__main__":
 
+    from click import Path, command, option
     from logging import basicConfig, INFO
     from polyjuice.feeds.crypto import CryptoFeed
     from polyjuice.feeds.market import MarketFeed
 
     basicConfig(level=INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    collector = Collector(MarketFeed, CryptoFeed)
-    collector.run_sync()
+    @command()
+    @option("--configuration-file", type=Path(readable=True))
+    def main(configuration_file: str | None):
+        if not configuration_file:
+            raise Exception("Configuration file not specified")
+        with CollectorConfiguration.load(configuration_file):
+            collector = Collector(MarketFeed, CryptoFeed)
+            collector.run_sync()
+
+    main()

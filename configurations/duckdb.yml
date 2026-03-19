@@ -1,0 +1,3 @@
+memory_limit: 4G
+threads: 4
+temp_directory: null

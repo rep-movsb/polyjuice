@@ -7,11 +7,17 @@ from websockets.asyncio.client import ClientConnection
 from typing import Any
 
 from polyjuice.collectorinterface import CollectorInterface
-from polyjuice.configuration import get_configuration
+from polyjuice.configurations.collector import (
+    CollectorConfiguration,
+    MarketFeedConfiguration,
+)
 from polyjuice.feed import Feed
 from polyjuice.models import Asset, Market
 
-configuration = get_configuration().market_feed
+
+def conf() -> MarketFeedConfiguration:
+    return CollectorConfiguration.get().market_feed
+
 
 global_market_connection = ContextVar("global_market_connection")
 
@@ -19,8 +25,8 @@ global_market_connection = ContextVar("global_market_connection")
 @asynccontextmanager
 async def market_connect():
     async with connect(
-        configuration.websocket_url,
-        ping_interval=configuration.websocket_ping_interval,
+        conf().websocket_url,
+        ping_interval=conf().websocket_ping_interval,
         ping_timeout=None,
     ) as websocket:
         global_market_connection.set(websocket)
@@ -99,8 +105,7 @@ class MarketFeed(Feed):
 
                 if event["event_type"] == "new_market":
                     if any(
-                        filter in event.get("slug")
-                        for filter in configuration.slug_filters
+                        filter in event.get("slug") for filter in conf().slug_filters
                     ):
                         if (
                             event["market"]

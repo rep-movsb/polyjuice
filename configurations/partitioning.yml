@@ -1,0 +1,7 @@
+time_partition_seconds: 3600
+rows_per_export: 2000000
+rows_per_batch: 50000
+max_workers: 8
+max_tasks_per_worker: 8
+write_queue_size: 5
+writer_processes: 4

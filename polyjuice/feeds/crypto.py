@@ -8,11 +8,16 @@ from websockets import connect
 from websockets.asyncio.client import ClientConnection
 
 from polyjuice.collectorinterface import CollectorInterface
-from polyjuice.configuration import get_configuration
+from polyjuice.configurations.collector import (
+    CollectorConfiguration,
+    CryptoFeedConfiguration,
+)
 from polyjuice.feed import Feed
 from polyjuice.models import Asset, Market
 
-configuration = get_configuration().crypto_feed
+
+def conf() -> CryptoFeedConfiguration:
+    return CollectorConfiguration.get().crypto_feed
 
 
 def compute_crypto_slug(prefix, ts, interval):
@@ -34,8 +39,8 @@ class CryptoFeed(Feed):
 
     async def fetch_loop(self):
         async with connect(
-            configuration.rtds_websocket_url,
-            ping_interval=configuration.rtds_websocket_ping_interval,
+            conf().rtds_websocket_url,
+            ping_interval=conf().rtds_websocket_ping_interval,
             ping_timeout=None,
         ) as connection:
             subscribe_message = {
@@ -63,7 +68,7 @@ class CryptoFeed(Feed):
 
     async def get_crypto_market(self, slug: str) -> Market:
         async with ClientSession() as session:
-            async with session.get(f"{configuration.gamma_url}/{slug}") as response:
+            async with session.get(f"{conf().gamma_url}/{slug}") as response:
                 response.raise_for_status()
                 data = await response.json()
 
@@ -90,9 +95,9 @@ class CryptoFeed(Feed):
         watched_crypto_slugs = set(
             compute_crypto_slug(c, ts, i)
             for (c, ts, i) in product(
-                configuration.watched_symbols,
+                conf().watched_symbols,
                 range_24h,
-                configuration.watched_ranges,
+                conf().watched_ranges,
             )
         )
         for slug, _ in sorted(watched_crypto_slugs, key=lambda e: e[1]):
