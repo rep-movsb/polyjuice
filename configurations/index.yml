@@ -1,2 +1,0 @@
-max_workers: 8
-max_tasks_per_worker: 8
