@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from dataclasses import dataclass
 from duckdb import connect
 from logging import info
 from polars import from_dicts
@@ -8,6 +9,8 @@ from time import monotonic, time
 from typing import Any
 
 from polyjuice.configurations.duckdb import DuckDBConfiguration
+from polyjuice.stream import Stream, StreamReader
+from polyjuice.streamgroup import time_partition_from_timestamp
 
 
 def duckdb_conf() -> DuckDBConfiguration:
@@ -73,3 +76,90 @@ def export_dataset(
     )
     del table
     default_memory_pool().release_unused()
+
+
+@dataclass
+class DatasetStreamReader(StreamReader):
+
+    dataset_directory: str
+    time_partition: int
+    stream_group: str
+    start_timestamp: int
+    n: int
+    total: int
+
+    def read(self):
+        with dataset_connection(
+            self.dataset_directory, self.time_partition
+        ) as connection:
+            total_rows = 0
+            cursor = connection.execute(
+                """
+                SELECT value FROM dataset
+                WHERE time_partition = $time_partition
+                AND stream_group = $stream_group
+                AND local_timestamp > $start_timestamp
+                """,
+                parameters={
+                    "time_partition": self.time_partition,
+                    "stream_group": self.stream_group,
+                    "start_timestamp": (
+                        self.start_timestamp if self.start_timestamp is not None else 0
+                    ),
+                },
+            )
+            while rows := cursor.fetchmany(100000):
+                for row in rows:
+                    yield row[0].decode()
+                    total_rows += 1
+            info(
+                f"{self.n / self.total:.2f} {total_rows:<8} {self.time_partition} {self.stream_group}"
+            )
+
+
+class DatasetStream(Stream):
+
+    def __init__(self, dataset_directory: str):
+        self.dataset_directory = dataset_directory
+
+    def readers(self, start_timestamp: int):
+        with dataset_connection(self.dataset_directory) as connection:
+            if start_timestamp is not None:
+                start_time_partition = time_partition_from_timestamp(start_timestamp)
+                all_partitions = connection.execute(
+                    """
+                    SELECT DISTINCT time_partition, stream_group
+                    FROM dataset
+                    WHERE time_partition >= $start_time_partition
+                    """,
+                    parameters={"start_time_partition": start_time_partition},
+                ).fetchall()
+            else:
+                all_partitions = connection.execute(
+                    "SELECT DISTINCT time_partition, stream_group FROM dataset"
+                ).fetchall()
+
+        return [
+            DatasetStreamReader(
+                self.dataset_directory,
+                time_partition,
+                stream_group,
+                start_timestamp,
+                i,
+                len(all_partitions),
+            )
+            for i, (time_partition, stream_group) in enumerate(all_partitions)
+        ]
+
+    def get_last_timestamp(self):
+        with dataset_connection(self.dataset_directory) as connection:
+            last_time_partition = connection.execute(
+                "SELECT MAX(time_partition) FROM dataset"
+            ).fetchone()[0]
+            info(f"Last time partition is {last_time_partition}")
+            last_timestamp = connection.execute(
+                "SELECT MAX(local_timestamp) FROM dataset WHERE time_partition=$time_partition",
+                parameters={"time_partition": last_time_partition},
+            ).fetchone()[0]
+            info(f"Last local timestamp is {last_timestamp}")
+            return last_timestamp

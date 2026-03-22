@@ -73,8 +73,10 @@ def writer_process(target: Callable[[Any], None], queue_max_size=0):
                 input_queue.put(None)
                 if not handler.queue_was_joined:
                     warning("Queue was not joined, potential queue corruption")
-                    handler.join()
-                process.join()
+                    process.join(15000)
+                    process.terminate()
+                else:
+                    process.join()
 
 
 def pool_write(writers: list[WriterProcessHandler], chunk: list[Any]):
