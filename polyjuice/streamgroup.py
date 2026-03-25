@@ -1,9 +1,17 @@
+from dataclasses import dataclass
 from hashlib import md5
 from re import match
 from typing import Any
+from yaml import safe_load
 
 from polyjuice.configurations.partitioning import PartitioningConfiguration
 from polyjuice.index import Index
+
+
+@dataclass
+class StreamGroup:
+    name: str
+    partitions: int = 1
 
 
 def conf() -> PartitioningConfiguration:
@@ -56,18 +64,40 @@ def match_all(event: dict[str, Any], index: Index, match_patterns: dict[str, str
     return True
 
 
-def stream_groups_from_event(
-    event: dict[str, Any], index: Index, rules: dict[str, Any] | None
-):
-    if rules is None:
-        yield from partitions_from_event(event)
-        return
+@dataclass
+class StreamGroupRuleSet:
 
-    for rule in rules:
-        if "match" in rule and not match_all(event, index, rule["match"]):
-            continue
+    groups: dict[str, StreamGroup] | None = None
+    rules: dict[str, Any] | None = None
+    index: Index | None = None
 
-        yield rule["group"]
+    def load(rules_file: str, index: Index):
+        with open(rules_file) as file:
+            groups_and_rules = safe_load(file)
+            groups = dict()
+            for name, group_definition in groups_and_rules["groups"].items():
+                groups[name] = StreamGroup(name, group_definition.get("partitions", 1))
+            return StreamGroupRuleSet(groups, groups_and_rules["rules"], index)
 
-        if not rule.get("continue", False):
-            break
+    def stream_groups_from_event(self, event: dict[str, Any]):
+        if self.rules is None:
+            yield from partitions_from_event(event)
+            return
+
+        for rule in self.rules:
+            if "match" in rule and not match_all(event, self.index, rule["match"]):
+                continue
+
+            if "partition_by" in rule:
+                attribute = get_attribute(event, rule["partition_by"], self.index)
+                partition_number = (
+                    int.from_bytes(md5(attribute.encode()).digest())
+                    % self.groups[rule["group"]].partitions
+                )
+                yield f"{rule['group']}-{partition_number}"
+            else:
+                for i in range(self.groups[rule["group"]].partitions):
+                    yield f"{rule['group']}-{i}"
+
+            if not rule.get("continue", False):
+                break

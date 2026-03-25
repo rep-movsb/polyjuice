@@ -3,7 +3,7 @@ from logging import warning
 from multiprocessing import Process, JoinableQueue
 from queue import Empty, Full
 from random import choice
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 queues_stack = []
 
@@ -31,7 +31,7 @@ class WriterProcessHandler:
         self.stack_index = stack_index
         self.queue_was_joined = False
 
-    def write(self, chunk: list[Any], block=True):
+    def write(self, chunk: Any, block=True):
         global queues_stack
         input_queue, exception_queue = queues_stack[self.stack_index]
         try:
@@ -79,7 +79,7 @@ def writer_process(target: Callable[[Any], None], queue_max_size=0):
                     process.join()
 
 
-def pool_write(writers: list[WriterProcessHandler], chunk: list[Any]):
+def pool_write(writers: list[WriterProcessHandler], chunk: Any):
     for writer in writers:
         try:
             writer.write(chunk, block=False)

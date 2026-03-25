@@ -5,17 +5,16 @@ from logging import info
 from multiprocessing import Pool
 from traceback import print_exc
 from typing import Any, Generator, Iterable
-from yaml import safe_load
 
 from polyjuice.configurations.duckdb import DuckDBConfiguration
 from polyjuice.configurations.partitioning import PartitioningConfiguration
-from polyjuice.dataset import DatasetStream, export_dataset
+from polyjuice.data.dataset import DatasetStream, export_dataset
 from polyjuice.index import Index
-from polyjuice.raw import RawStream
-from polyjuice.stream import Stream, StreamReader
+from polyjuice.data.rawstream import RawStream
+from polyjuice.data.stream import Stream, StreamReader
 from polyjuice.streamgroup import (
+    StreamGroupRuleSet,
     time_partition_from_timestamp,
-    stream_groups_from_event,
 )
 from polyjuice.utils import batched, list_batched
 from polyjuice.writerprocess import WriterProcessHandler, pool_write, writer_process
@@ -32,13 +31,11 @@ def accumulate_export_dataset(output_dataset: str, stream: Iterable[Any]):
 
 
 def extract_info(
-    lines: Generator[str, None, None],
-    index: Index,
-    grouping_rules: dict[str, Any] | None = None,
+    lines: Generator[str, None, None], index: Index, rules: StreamGroupRuleSet
 ):
     for line in lines:
         event = loads(line)
-        for stream_group in stream_groups_from_event(event, index, grouping_rules):
+        for stream_group in rules.stream_groups_from_event(event):
             time_partition = time_partition_from_timestamp(event["local_timestamp"])
             index.process_event(event, stream_group)
             yield {
@@ -73,7 +70,7 @@ def partition_streams(
     index: Index,
     output_dataset: str,
     last_timestamp: int | None = None,
-    grouping_rules: dict[str, Any] | None = None,
+    rules: StreamGroupRuleSet | None = None,
 ):
     readers = stream.readers(last_timestamp)
     info(f"{len(readers)} chunks will be processed")
@@ -95,7 +92,10 @@ def partition_streams(
         ) as pool:
             total = 0
             for partial_index, partial_total in pool.imap_unordered(
-                partial(write_event_batches, grouping_rules, index, writers), readers
+                partial(
+                    write_event_batches, rules or StreamGroupRuleSet(), index, writers
+                ),
+                readers,
             ):
                 index.update(partial_index)
                 total += partial_total
@@ -191,9 +191,8 @@ if __name__ == "__main__":
         configuration_file: str | None,
         grouping_rules_file: str | None,
     ):
-        with open(grouping_rules_file) as file:
-            grouping_rules = safe_load(file)
         index = Index.load(index_file)
+        rules = StreamGroupRuleSet.load(grouping_rules_file, index)
         with ExitStack() as stack:
             stack.enter_context(DuckDBConfiguration.load(duckdb_configuration_file))
             stack.enter_context(PartitioningConfiguration.load(configuration_file))
@@ -203,7 +202,7 @@ if __name__ == "__main__":
                 index,
                 output_dataset,
                 DatasetStream(output_dataset).get_last_timestamp() if append else None,
-                grouping_rules,
+                rules,
             )
 
     @cli.command()
