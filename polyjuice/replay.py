@@ -2,6 +2,7 @@ from asyncio import run
 from contextlib import ExitStack
 from functools import partial
 from logging import info, warning
+from math import floor
 from multiprocessing import Pool
 from typing import Any, Iterable, Type
 
@@ -32,27 +33,27 @@ class StateClassConfiguration:
         self.kwargs = kwargs
 
 
-async def reference_clock(start: int, delta: int):
-    t = start
+async def reference_clock(start: float, delta: float):
+    t = floor(start)
     while True:
         yield t
         t += delta
 
 
 async def stream_global_state(
-    state: State, reader: DatasetOrderedStreamReader, dt: int
+    state: State, reader: DatasetOrderedStreamReader, dt: float, buffer_length: float
 ):
     stream = state.process_stream(reader)
     first_timestamp = await anext(stream)
 
-    def on_out_of_sync(output_timestamp: int, change: StateChange):
+    def on_out_of_sync(output_timestamp: float, change: StateChange):
         warning(f"Out of sync {change} {output_timestamp - change.timestamp}")
         return True
 
     async for timestamp, stats in compute_state(
         reference_clock(first_timestamp, dt),
         stream,
-        buffer_length=1,
+        buffer_length=buffer_length,
         on_out_of_sync=on_out_of_sync,
     ):
         yield (timestamp, stats)
@@ -97,11 +98,14 @@ def replay_stream_group_sync(
     state = configuration.Class(*configuration.args, **configuration.kwargs)
 
     async def replay_stream_group():
+        total = 0
         rows = []
         async for timestamp, stats in stream_global_state(
-            state, reader, conf().buffer_length
+            state, reader, conf().time_step_seconds, conf().buffer_length_seconds
         ):
-            rows.extend(state.export(timestamp, stats))
+            exported_rows = state.export(timestamp, stats)
+            total += len(exported_rows)
+            rows.extend(exported_rows)
             if len(rows) >= conf().rows_per_batch:
                 pool_write(
                     writers,
@@ -124,14 +128,18 @@ def replay_stream_group_sync(
                     state.schema(),
                 ),
             )
+        return total
 
     info(f"Starting state recovery of stream group {reader.stream_group}")
     try:
-        run(replay_stream_group())
+        total = run(replay_stream_group())
     except Exception as ex:
-        print(str(ex))
+        warning(str(ex))
         raise
-    info(f"Finished state recovery of stream group {reader.stream_group}")
+    info(
+        f"Finished state recovery of stream group {reader.stream_group}, total {total}"
+    )
+    return total
 
 
 def replay_all(
@@ -160,7 +168,8 @@ def replay_all(
             arguments = [
                 (writers, reader, stream_group_to_state_class_map) for reader in readers
             ]
-            pool.starmap(replay_stream_group_sync, arguments)
+            for partial_total in pool.starmap(replay_stream_group_sync, arguments):
+                total += partial_total
             # We need to ensure the queues are flushed before the pool is
             # disposed of; an early termination of the feeder process may cause
             # the receiver side to hang otherwise

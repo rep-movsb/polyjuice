@@ -73,7 +73,7 @@ def writer_process(target: Callable[[Any], None], queue_max_size=0):
                 input_queue.put(None)
                 if not handler.queue_was_joined:
                     warning("Queue was not joined, potential queue corruption")
-                    process.join(15000)
+                    process.join(15)
                     process.terminate()
                 else:
                     process.join()

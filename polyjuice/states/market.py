@@ -3,11 +3,19 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from json import loads
 from logging import debug
+from math import isclose
 from polars import Date, Float32, Float64, String, UInt32
 from typing import Any
 
 from polyjuice.data.dataset import DatasetOrderedStreamReader
 from polyjuice.state import AggregationStatistics, State, StateChange
+
+CUTOFF_SECONDS = 600
+
+
+@dataclass
+class MarketExpiredException(Exception):
+    market_id: str
 
 
 @dataclass
@@ -35,6 +43,7 @@ class Asset:
 @dataclass
 class Market:
     assets: dict[str, Asset] = field(default_factory=lambda: defaultdict(Asset))
+    last_update_timestamp: float = 0
 
 
 def level_as_int(level):
@@ -126,12 +135,14 @@ class MarketState(State):
     def process_market_event(
         self, timestamp: float, market_id: str, event: dict[str, Any]
     ):
+        market = self.markets[market_id]
         if event["event_type"] == "book":
-            asset = self.markets[market_id].assets[event["asset_id"]]
+            asset = market.assets[event["asset_id"]]
             bids = event["bids"]
             asks = event["asks"]
 
-            def initialize_book(asset=asset, bids=bids, asks=asks):
+            def initialize_book():
+                market.last_update_timestamp = timestamp
                 asset.book_resets += 1
                 asset.bid_levels = [Level(has_value=False)] * 99
                 for bid in bids:
@@ -149,7 +160,8 @@ class MarketState(State):
             price_changes = event["price_changes"]
             assets = self.markets[market_id].assets
 
-            def apply_price_changes(price_changes=price_changes, assets=assets):
+            def apply_price_changes():
+                market.last_update_timestamp = timestamp
                 for pc in price_changes:
                     asset: Asset = assets[pc["asset_id"]]
                     levels = (
@@ -166,24 +178,33 @@ class MarketState(State):
             size = event["size"]
             side = event["side"]
 
-            def apply_last_trade_price(asset=asset, price=price, size=size, side=side):
+            def apply_last_trade_price():
+                market.last_update_timestamp = timestamp
                 asset.last_trade_price = price
                 asset.last_trade_size = size
                 asset.last_trade_is_bid = side == "BUY"
 
             yield StateChange(timestamp, apply_last_trade_price)
         elif event["event_type"] == "best_bid_ask":
-            pass
+            market.last_update_timestamp = timestamp
         else:
             debug(event)
 
     def export(self, timestamp: int, stats: AggregationStatistics):
         enriched = []
+        expired_markets = set()
         for market_id, market in self.markets.items():
             for asset_id, asset in market.assets.items():
-                enriched.append(
-                    self.enrich(timestamp, stats, market_id, market, asset_id, asset)
-                )
+                try:
+                    enriched.append(
+                        self.enrich(
+                            timestamp, stats, market_id, market, asset_id, asset
+                        )
+                    )
+                except MarketExpiredException as ex:
+                    expired_markets.add(ex.market_id)
+        for market_id in expired_markets:
+            self.markets.pop(market_id)
         return enriched
 
     def enrich(
@@ -196,12 +217,17 @@ class MarketState(State):
         asset: Asset,
     ):
         imbalance = compute_imbalance(asset.bid_levels, asset.ask_levels)
+        if (
+            isclose(abs(imbalance), 1)
+            and timestamp >= market.last_update_timestamp + CUTOFF_SECONDS
+        ):
+            raise MarketExpiredException(market_id=market_id)
         best_bid, best_ask = get_best_bid_and_ask(asset.bid_levels, asset.ask_levels)
         midprice = (best_bid + best_ask) / 2
         spread = best_ask - best_bid
         levels = generate_levels(asset.bid_levels, asset.ask_levels)
         return {
-            "date": datetime.fromtimestamp(timestamp / 1000).date(),
+            "date": datetime.fromtimestamp(timestamp).date(),
             "timestamp": timestamp,
             "changes": stats.changes,
             "mean_delay": stats.mean_delay,

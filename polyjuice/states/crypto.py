@@ -4,8 +4,10 @@ from re import match
 from typing import Any
 
 from polyjuice.index import Index
-from polyjuice.states.market import MarketState
+from polyjuice.states.market import MarketExpiredException, MarketState
 from polyjuice.state import StateChange
+
+CUTOFF_SECONDS = 600
 
 
 @dataclass
@@ -90,6 +92,8 @@ class CryptoMarketState(MarketState):
             range_start = self.market_ranges[market_id].start
             range_end = self.market_ranges[market_id].end
             in_range = self.market_ranges[market_id].currently_in_range
+            if timestamp >= range_end + CUTOFF_SECONDS:
+                raise MarketExpiredException(market_id=market_id)
         else:
             range_start = None
             range_end = None

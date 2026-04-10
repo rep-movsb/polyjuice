@@ -1,7 +1,7 @@
 from contextlib import ExitStack
 from functools import partial
-from json import loads
-from logging import info
+from json import JSONDecodeError, loads
+from logging import info, warning
 from multiprocessing import Pool
 from traceback import print_exc
 from typing import Any, Generator, Iterable
@@ -34,7 +34,11 @@ def extract_info(
     lines: Generator[str, None, None], index: Index, rules: StreamGroupRuleSet
 ):
     for line in lines:
-        event = loads(line)
+        try:
+            event = loads(line)
+        except JSONDecodeError:
+            warning(f"Data is corrupted, skipping")
+            continue
         for stream_group in rules.stream_groups_from_event(event):
             time_partition = time_partition_from_timestamp(event["local_timestamp"])
             index.process_event(event, stream_group)
